@@ -1,18 +1,16 @@
 import os
 import zipfile
 import urllib.request
-from datetime import datetime, timezone, timedelta
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
 import rasterio
-from rasterio.mask import mask
-from shapely.geometry import box
 
 # ------------------------------------------------------------------------------
-# 1. DOMAIN BOUNDS (Ohio Region)
+# 1. DOMAIN BOUNDS & RESOLUTION (Ohio Region)
 # ------------------------------------------------------------------------------
 WEST, SOUTH, EAST, NORTH = -85.0, 38.0, -80.0, 42.0
+IMAGE_RES = "3840,2160"
 
 # ------------------------------------------------------------------------------
 # 2. EXACT COLOR PALETTE & THRESHOLD BREAKS (Inches)
@@ -36,69 +34,53 @@ colors_rgb = [
 cmap = ListedColormap(colors_rgb)
 norm = BoundaryNorm(bounds, cmap.N)
 
-def download_geotiff(duration_hr="01", tif_path="latest_ffg.tif"):
-    """Fetches raw GeoTIFF grid from NOAA NWS Open Data buckets."""
-    now = datetime.now(timezone.utc)
-    dates_to_check = [now, now - timedelta(days=1)]
+def download_raw_numeric_raster(duration_layer="show:0", tif_path="raw_ffg.tif"):
+    """Downloads raw 32-bit floating-point numerical grid directly from NOAA's active ImageServer."""
+    base_url = "https://mapservices.weather.noaa.gov/raster/rest/services/precip/rfc_gridded_ffg/MapServer/export"
     
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    download_success = False
+    params = [
+        f"bbox={WEST},{SOUTH},{EAST},{NORTH}",
+        "bboxSR=4326",
+        "imageSR=4326",
+        f"size={IMAGE_RES}",
+        "format=tiff",  # Request raw GeoTIFF data values instead of PNG
+        "transparent=true",
+        f"layers={duration_layer}",
+        "f=image"
+    ]
+    
+    export_url = f"{base_url}?" + "&".join(params)
+    
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    req = urllib.request.Request(export_url, headers=headers)
+    
+    with urllib.request.urlopen(req, timeout=30) as response, open(tif_path, 'wb') as out_file:
+        out_file.write(response.read())
 
-    for dt in dates_to_check:
-        date_str = dt.strftime("%Y%m%d")
-        
-        urls = [
-            f"https://noaa-nws-ffg-pds.s3.amazonaws.com/ffg_{date_str}/ffg_{duration_hr}h_{date_str}.tif",
-            f"https://water.weather.gov/precip/pds/ffg/ffg_{duration_hr}h.tif",
-            f"https://mesonet.agron.iastate.edu/data/raster/ffg/ffg_{duration_hr}h.tif"
-        ]
-
-        for url in urls:
-            try:
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=20) as response, open(tif_path, 'wb') as out_file:
-                    out_file.write(response.read())
-                
-                if os.path.exists(tif_path) and os.path.getsize(tif_path) > 5000:
-                    print(f"Successfully retrieved GeoTIFF from: {url}")
-                    download_success = True
-                    break
-            except Exception as e:
-                print(f"Failed attempt for {url}: {e}")
-                continue
-        
-        if download_success:
-            break
-
-    if not download_success:
-        raise RuntimeError("Unable to download FFG GeoTIFF data from NOAA sources.")
-
-def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
-    tif_path = "latest_ffg.tif"
+def generate_kmz(duration_layer="show:0", duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
+    tif_path = "raw_ffg.tif"
     png_path = "ffg_overlay.png"
     kml_path = "doc.kml"
 
-    download_geotiff(duration_hr, tif_path)
+    # 1. Fetch raw 32-bit float raster grid from NOAA
+    download_raw_numeric_raster(duration_layer, tif_path)
 
-    # Open GeoTIFF grid with rasterio
+    # 2. Open TIFF numerical array directly into memory
     with rasterio.open(tif_path) as src:
-        # Crop data array directly to Ohio bounding box
-        bbox_geom = [box(WEST, SOUTH, EAST, NORTH)]
-        out_image, out_transform = mask(src, bbox_geom, crop=True)
-        data = out_image[0].astype(float)
+        data = src.read(1).astype(float)
         
-        # Mask out-of-bounds/nodata pixels
+        # Handle nodata / zero masking
         if src.nodata is not None:
             data[data == src.nodata] = np.nan
         data[data <= 0] = np.nan
 
-        # Convert mm to inches if dataset is in millimeters
+        # Convert values to inches if provided in millimeters
         if np.nanmax(data) > 50:
             ffg_inches = data * 0.0393701
         else:
             ffg_inches = data
 
-    # Render clean raster overlay with exact color thresholds
+    # 3. Render clean, discrete color array (Zero anti-aliasing / zero edge artifacts)
     fig, ax = plt.subplots(figsize=(16, 9), dpi=240)
     fig.patch.set_alpha(0)
     ax.patch.set_alpha(0)
@@ -120,7 +102,7 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     plt.savefig(png_path, format="png", transparent=True, dpi=240)
     plt.close()
 
-    # Generate GroundOverlay KML
+    # 4. Create GroundOverlay KML
     kml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Folder>
@@ -143,14 +125,15 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     with open(kml_path, "w", encoding="utf-8") as f:
         f.write(kml_content)
 
-    # Package into KMZ
+    # 5. Zip into KMZ
     with zipfile.ZipFile(output_kmz, "w", zipfile.ZIP_DEFLATED) as kmz:
         kmz.write(png_path, arcname=png_path)
         kmz.write(kml_path, arcname="doc.kml")
 
+    # Cleanup temporary local artifacts
     for p in [tif_path, png_path, kml_path]:
         if os.path.exists(p):
             os.remove(p)
 
 if __name__ == "__main__":
-    generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz")
+    generate_kmz(duration_layer="show:0", duration_hr="01", output_kmz="Custom_FFG_1hr.kmz")
