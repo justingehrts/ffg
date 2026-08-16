@@ -6,12 +6,19 @@ on:
   workflow_dispatch:      # Allows manual trigger button in GitHub UI
 
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
 
+concurrency:
+  group: 'pages'
+  cancel-in-progress: true
+
 jobs:
   build-and-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}Custom_FFG_1hr.kmz
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -34,11 +41,14 @@ jobs:
       - name: Generate Custom KMZ
         run: python generate_ffg.py
 
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./
-          destination_dir: ./
-          keep_files: false
-          exclude_assets: '.github,generate_ffg.py'
+          path: '.'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
