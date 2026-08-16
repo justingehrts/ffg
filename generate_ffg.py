@@ -1,7 +1,7 @@
 import os
 import gzip
 import zipfile
-import urllib.request
+import requests
 import pygrib
 import numpy as np
 import matplotlib.pyplot as plt
@@ -40,32 +40,35 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     png_path = "ffg_overlay.png"
     kml_path = "doc.kml"
 
-    # 1. Download MRMS FFG Data (Static filename bypasses 404 timestamp issues)
     url = f"https://mrms.ncep.noaa.gov/data/2D/FlashFloodGuidance_{duration_hr}H/MRMS_FlashFloodGuidance_{duration_hr}H.latest.grib2.gz"
-    
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    req = urllib.request.Request(url, headers=headers)
-    
+
+    # Use a requests Session to retain User-Agent across 302 redirects
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+
     try:
-        with urllib.request.urlopen(req, timeout=30) as response, open(gz_path, 'wb') as out_file:
-            out_file.write(response.read())
+        response = session.get(url, timeout=30, allow_redirects=True)
+        response.raise_for_status()
+        with open(gz_path, 'wb') as f:
+            f.write(response.content)
     except Exception as e:
         raise RuntimeError(f"Failed to download MRMS FFG data: {e}")
 
-    # 2. Decompress GZIP
+    # Decompress GZIP
     with gzip.open(gz_path, 'rb') as f_in, open(grib_path, 'wb') as f_out:
         f_out.write(f_in.read())
 
-    # 3. Extract Raw Grid Data
+    # Extract Raw Grid Data
     grbs = pygrib.open(grib_path)
     grb = grbs.message(1)
     
-    # Subset to Ohio bounds to reduce processing memory
+    # Subset to Ohio domain
     try:
         data_sub, lats_sub, lons_sub = grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST+360, lon2=EAST+360)
         lons_sub = lons_sub - 360.0
-    except:
-        # Fallback if standard -180 to 180 is used
+    except Exception:
         data_sub, lats_sub, lons_sub = grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST, lon2=EAST)
     
     grbs.close()
@@ -76,10 +79,10 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     else:
         ffg_inches = data_sub
 
-    # Mask missing or zero data so the background is perfectly transparent
+    # Mask non-data values for full background transparency
     ffg_inches = np.where(ffg_inches <= 0.01, np.nan, ffg_inches)
 
-    # 4. Render the Image
+    # Render clean image canvas
     fig, ax = plt.subplots(figsize=(16, 9), dpi=240)
     fig.patch.set_alpha(0)
     ax.patch.set_alpha(0)
@@ -99,7 +102,7 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     plt.savefig(png_path, format="png", transparent=True, dpi=240)
     plt.close()
 
-    # 5. Build KML
+    # Build KML
     kml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Folder>
@@ -122,12 +125,12 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     with open(kml_path, "w", encoding="utf-8") as f:
         f.write(kml_content)
 
-    # 6. Package KMZ
+    # Package KMZ
     with zipfile.ZipFile(output_kmz, "w", zipfile.ZIP_DEFLATED) as kmz:
         kmz.write(png_path, arcname=png_path)
         kmz.write(kml_path, arcname="doc.kml")
 
-    # Cleanup
+    # Cleanup temporary files
     for p in [gz_path, grib_path, png_path, kml_path]:
         if os.path.exists(p):
             os.remove(p)
