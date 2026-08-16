@@ -1,7 +1,7 @@
 name: Generate Custom FFG KMZ
 
 on:
-  workflow_dispatch:  # <--- Only runs when you manually click the button
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -33,7 +33,7 @@ jobs:
 
       - name: Install Python Packages
         run: |
-          pip install pygrib numpy matplotlib
+          pip install pygrib numpy matplotlib requests
 
       - name: Generate Custom KMZ
         run: python generate_ffg.py
