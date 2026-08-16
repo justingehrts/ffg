@@ -1,11 +1,11 @@
 import os
+import gzip
 import zipfile
 import urllib.request
-import urllib.parse
+import pygrib
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
-import rasterio
 
 # ------------------------------------------------------------------------------
 # 1. DOMAIN BOUNDS (Ohio Region)
@@ -13,7 +13,7 @@ import rasterio
 WEST, SOUTH, EAST, NORTH = -85.0, 38.0, -80.0, 42.0
 
 # ------------------------------------------------------------------------------
-# 2. EXACT PALETTE BREAKS (Inches)
+# 2. EXACT COLOR PALETTE & THRESHOLD BREAKS (Inches)
 # ------------------------------------------------------------------------------
 bounds = [0.0, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00, 2.50, 3.00, 4.00, 5.00, 10.0]
 
@@ -34,57 +34,62 @@ colors_rgb = [
 cmap = ListedColormap(colors_rgb)
 norm = BoundaryNorm(bounds, cmap.N)
 
-def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
-    raw_tif = "raw_ffg.tif"
+def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
+    gz_path = "latest_ffg.grib2.gz"
+    grib_path = "latest_ffg.grib2"
     png_path = "ffg_overlay.png"
     kml_path = "doc.kml"
 
-    # Query NOAA Raster MapServer for Layer 0 (1-Hour FFG) exporting raw TIFF float values
-    base_url = "https://mapservices.weather.noaa.gov/raster/rest/services/precip/rfc_gridded_ffg/MapServer/export"
-    params = {
-        "bbox": f"{WEST},{SOUTH},{EAST},{NORTH}",
-        "bboxSR": "4326",
-        "imageSR": "4326",
-        "size": "1920,1080",
-        "format": "tiff",  # Request raw raster values
-        "transparent": "true",
-        "layers": "show:0",
-        "f": "image"
-    }
-
-    export_url = f"{base_url}?" + urllib.parse.urlencode(params)
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    # 1. Download MRMS FFG Data (Static filename bypasses 404 timestamp issues)
+    url = f"https://mrms.ncep.noaa.gov/data/2D/FlashFloodGuidance_{duration_hr}H/MRMS_FlashFloodGuidance_{duration_hr}H.latest.grib2.gz"
     
-    req = urllib.request.Request(export_url, headers=headers)
-    with urllib.request.urlopen(req, timeout=30) as response, open(raw_tif, 'wb') as out_file:
-        out_file.write(response.read())
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    req = urllib.request.Request(url, headers=headers)
+    
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response, open(gz_path, 'wb') as out_file:
+            out_file.write(response.read())
+    except Exception as e:
+        raise RuntimeError(f"Failed to download MRMS FFG data: {e}")
 
-    # Read numerical array directly with rasterio
-    with rasterio.open(raw_tif) as src:
-        data = src.read(1).astype(float)
-        if src.nodata is not None:
-            data[data == src.nodata] = np.nan
-        data[data <= 0] = np.nan
+    # 2. Decompress GZIP
+    with gzip.open(gz_path, 'rb') as f_in, open(grib_path, 'wb') as f_out:
+        f_out.write(f_in.read())
 
-        # Convert mm to inches if needed
-        if np.nanmax(data) > 50:
-            ffg_inches = data * 0.0393701
-        else:
-            ffg_inches = data
+    # 3. Extract Raw Grid Data
+    grbs = pygrib.open(grib_path)
+    grb = grbs.message(1)
+    
+    # Subset to Ohio bounds to reduce processing memory
+    try:
+        data_sub, lats_sub, lons_sub = grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST+360, lon2=EAST+360)
+        lons_sub = lons_sub - 360.0
+    except:
+        # Fallback if standard -180 to 180 is used
+        data_sub, lats_sub, lons_sub = grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST, lon2=EAST)
+    
+    grbs.close()
 
-    # Plot directly with matplotlib using your exact custom color mapping
+    # Convert millimeters to inches (MRMS is stored in mm)
+    if data_sub.max() > 50:
+        ffg_inches = data_sub * 0.0393701
+    else:
+        ffg_inches = data_sub
+
+    # Mask missing or zero data so the background is perfectly transparent
+    ffg_inches = np.where(ffg_inches <= 0.01, np.nan, ffg_inches)
+
+    # 4. Render the Image
     fig, ax = plt.subplots(figsize=(16, 9), dpi=240)
     fig.patch.set_alpha(0)
     ax.patch.set_alpha(0)
     ax.set_axis_off()
 
-    ax.imshow(
-        ffg_inches,
+    ax.pcolormesh(
+        lons_sub, lats_sub, ffg_inches,
         cmap=cmap,
         norm=norm,
-        extent=[WEST, EAST, SOUTH, NORTH],
-        origin='upper',
-        interpolation='nearest'
+        shading='auto'
     )
 
     ax.set_xlim(WEST, EAST)
@@ -94,13 +99,13 @@ def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
     plt.savefig(png_path, format="png", transparent=True, dpi=240)
     plt.close()
 
-    # Create GroundOverlay KML
+    # 5. Build KML
     kml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Folder>
     <name>Custom Flash Flood Guidance</name>
     <GroundOverlay>
-      <name>1-Hour FFG</name>
+      <name>{duration_hr}-Hour FFG</name>
       <Icon>
         <href>{png_path}</href>
       </Icon>
@@ -117,13 +122,15 @@ def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
     with open(kml_path, "w", encoding="utf-8") as f:
         f.write(kml_content)
 
+    # 6. Package KMZ
     with zipfile.ZipFile(output_kmz, "w", zipfile.ZIP_DEFLATED) as kmz:
         kmz.write(png_path, arcname=png_path)
         kmz.write(kml_path, arcname="doc.kml")
 
-    for p in [raw_tif, png_path, kml_path]:
+    # Cleanup
+    for p in [gz_path, grib_path, png_path, kml_path]:
         if os.path.exists(p):
             os.remove(p)
 
 if __name__ == "__main__":
-    generate_kmz("Custom_FFG_1hr.kmz")
+    generate_kmz("01", "Custom_FFG_1hr.kmz")
