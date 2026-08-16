@@ -28,14 +28,9 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libeccodes-dev
-
       - name: Install Python Packages
         run: |
-          pip install pygrib numpy matplotlib
+          pip install geopandas matplotlib numpy
 
       - name: Generate Custom KMZ
         run: python generate_ffg.py
