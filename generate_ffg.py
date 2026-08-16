@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 import pygrib
 import numpy as np
 import matplotlib.pyplot as plt
-import cartopy.crs as ccrs
 from matplotlib.colors import ListedColormap, BoundaryNorm
 
 # ------------------------------------------------------------------------------
@@ -37,11 +36,9 @@ norm = BoundaryNorm(bounds, cmap.N)
 
 def download_latest_ffg(duration_hr="01", grib_path="latest_ffg.grib2"):
     """Fetches the latest GRIB2 FFG file from NOAA NOMADS or IEM Archive."""
-    # Attempt NOAA NOMADS current day run first
     now = datetime.now(timezone.utc)
     date_str = now.strftime("%Y%m%d")
     
-    # Standard NOAA NOMADS URL for National FFG
     urls = [
         f"https://nomads.ncep.noaa.gov/pub/data/nccf/com/ffg/prod/ffg.{date_str}/ffg_{duration_hr}h.grib2",
         f"https://mesonet.agron.iastate.edu/data/model/ffg/ffg_{duration_hr}h.grib2",
@@ -81,29 +78,30 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     # Normalize longitudes to [-180, 180]
     lons = np.where(lons > 180, lons - 360, lons)
 
-    # Convert mm to inches if needed (check unit attribute if available)
+    # Convert mm to inches if needed
     units = getattr(grb, 'units', 'mm')
     if 'mm' in str(units).lower() or data.max() > 50:
         ffg_inches = data * 0.0393701
     else:
         ffg_inches = data
 
-    fig = plt.figure(figsize=(16, 9), dpi=240)
-    ax = plt.axes([0, 0, 1, 1], projection=ccrs.PlateCarree())
-    ax.patch.set_alpha(0)
+    # Plot directly with matplotlib
+    fig, ax = plt.subplots(figsize=(16, 9), dpi=240)
     fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
     ax.set_axis_off()
 
     ax.pcolormesh(
         lons, lats, ffg_inches,
         cmap=cmap,
         norm=norm,
-        transform=ccrs.PlateCarree(),
         shading='auto'
     )
 
-    ax.set_extent([WEST, EAST, SOUTH, NORTH], crs=ccrs.PlateCarree())
+    ax.set_xlim(WEST, EAST)
+    ax.set_ylim(SOUTH, NORTH)
 
+    plt.subplots_adjust(left=0, right=0, bottom=0, top=0)
     plt.savefig(png_path, format="png", transparent=True, dpi=240)
     plt.close()
 
