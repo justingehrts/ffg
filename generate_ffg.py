@@ -1,94 +1,135 @@
 import os
 import zipfile
 import urllib.request
-from PIL import Image
+from datetime import datetime, timezone, timedelta
+import pygrib
 import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap, BoundaryNorm
 
 # ------------------------------------------------------------------------------
-# 1. DOMAIN BOUNDS & RESOLUTION (Ohio Region)
+# 1. DOMAIN BOUNDS (Ohio Region)
 # ------------------------------------------------------------------------------
 WEST, SOUTH, EAST, NORTH = -85.0, 38.0, -80.0, 42.0
-IMAGE_RES = "3840,2160"
 
 # ------------------------------------------------------------------------------
-# 2. EXACT COLOR SWAP MAP (NOAA Default RGB -> Your Custom RGB)
+# 2. EXACT COLOR PALETTE & THRESHOLD BREAKS (Inches)
 # ------------------------------------------------------------------------------
-PALETTE_MAP = {
-    # NOAA Default RGB tuple : Custom RGB tuple
-    (115, 0, 0):    (125, 1, 18),    # < 0.25"
-    (230, 0, 0):    (154, 42, 77),   # 0.25"-0.50"
-    (255, 115, 0):  (179, 74, 120),  # 0.50"-0.75"
-    (255, 170, 0):  (179, 74, 120),  # 0.75"-1.00"
-    (255, 255, 0):  (199, 106, 158), # 1.00"-1.50"
-    (170, 255, 0):  (214, 138, 190), # 1.50"-2.00"
-    (0, 255, 0):    (225, 168, 217), # 2.00"-2.50"
-    (0, 255, 194):  (225, 168, 217), # 2.50"-3.00"
-    (0, 194, 255):  (233, 196, 238), # 3.00"-4.00"
-    (0, 102, 255):  (239, 221, 250), # 4.00"-5.00"
-    (0, 0, 255):    (242, 240, 246), # >= 5.00"
-    (0, 153, 0):    (125, 1, 18),    # Boundary green shadow
-    (0, 128, 0):    (125, 1, 18)     # Boundary green shadow
-}
+bounds = [0.0, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00, 2.50, 3.00, 4.00, 5.00, 10.0]
 
-def generate_kmz(duration_layer="show:0", output_kmz="Custom_FFG_1hr.kmz"):
-    raw_png = "raw_ffg.png"
+colors_rgb = [
+    (125/255,   1/255,  18/255),  # < 0.25"
+    (154/255,  42/255,  77/255),  # 0.25" - 0.50"
+    (179/255,  74/255, 120/255),  # 0.50" - 0.75"
+    (179/255,  74/255, 120/255),  # 0.75" - 1.00"
+    (199/255, 106/255, 158/255),  # 1.00" - 1.50"
+    (214/255, 138/255, 190/255),  # 1.50" - 2.00"
+    (225/255, 168/255, 217/255),  # 2.00" - 2.50"
+    (225/255, 168/255, 217/255),  # 2.50" - 3.00"
+    (233/255, 196/255, 238/255),  # 3.00" - 4.00"
+    (239/255, 221/255, 250/255),  # 4.00" - 5.00"
+    (242/255, 240/255, 246/255)   # >= 5.00"
+]
+
+cmap = ListedColormap(colors_rgb)
+norm = BoundaryNorm(bounds, cmap.N)
+
+def download_raw_grib(duration_hr="01", grib_path="latest_ffg.grib2"):
+    """Downloads live GRIB2 FFG from NOAA NOMADS with browser headers and date fallbacks."""
+    now = datetime.now(timezone.utc)
+    
+    # Try today's date first, then yesterday if run hasn't posted yet
+    dates_to_check = [now, now - timedelta(days=1)]
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': '*/*'
+    }
+
+    download_success = False
+
+    for dt in dates_to_check:
+        date_str = dt.strftime("%Y%m%d")
+        
+        # NOAA NOMADS & NWS National FFG URLs
+        urls = [
+            f"https://nomads.ncep.noaa.gov/pub/data/nccf/com/ffg/prod/ffg.{date_str}/ffg_{duration_hr}h.grib2",
+            f"https://www.wpc.ncep.noaa.gov/ffg/ffg_{duration_hr}h.grib2"
+        ]
+
+        for url in urls:
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=20) as response, open(grib_path, 'wb') as out_file:
+                    out_file.write(response.read())
+                
+                if os.path.exists(grib_path) and os.path.getsize(grib_path) > 5000:
+                    print(f"Successfully retrieved GRIB2 data from: {url}")
+                    download_success = True
+                    break
+            except Exception as e:
+                print(f"Failed attempt for {url}: {e}")
+                continue
+        
+        if download_success:
+            break
+
+    if not download_success:
+        raise RuntimeError("Unable to download FFG GRIB2 data from NOAA sources.")
+
+def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
+    grib_path = "latest_ffg.grib2"
     png_path = "ffg_overlay.png"
     kml_path = "doc.kml"
 
-    # Construct NOAA MapServer export URL for 1-hour FFG
-    base_url = "https://mapservices.weather.noaa.gov/raster/rest/services/precip/rfc_gridded_ffg/MapServer/export"
-    params = [
-        f"bbox={WEST},{SOUTH},{EAST},{NORTH}",
-        "bboxSR=4326",
-        "imageSR=4326",
-        f"size={IMAGE_RES}",
-        "format=png32",
-        "transparent=true",
-        f"layers={duration_layer}",
-        "f=image"
-    ]
-    export_url = f"{base_url}?" + "&".join(params)
+    download_raw_grib(duration_hr, grib_path)
 
-    # Download raw image from NOAA REST service
-    req = urllib.request.Request(export_url, headers={'User-Agent': 'Mozilla/5.0'})
-    with urllib.request.urlopen(req, timeout=30) as response, open(raw_png, 'wb') as out_file:
-        out_file.write(response.read())
-
-    # Open image and process pixels using NumPy for exact color mapping
-    img = Image.open(raw_png).convert("RGBA")
-    arr = np.array(img)
-
-    # Vectorized color replacement with tolerance matching for edges
-    r, g, b, a = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2], arr[:, :, 3]
+    # Open raw GRIB2 message using pygrib
+    grbs = pygrib.open(grib_path)
+    grb = grbs.message(1)
     
-    # Start with transparent mask for empty background
-    new_arr = np.zeros_like(arr)
+    data = grb.values
+    lats, lons = grb.latlons()
+    
+    # Adjust longitudes to [-180, 180]
+    lons = np.where(lons > 180, lons - 360, lons)
 
-    # Map each target color based on Euclidean distance / exact match
-    for src_rgb, tgt_rgb in PALETTE_MAP.items():
-        # Match pixels within tolerance window of NOAA's standard colors
-        mask = (
-            (np.abs(r.astype(int) - src_rgb[0]) < 25) &
-            (np.abs(g.astype(int) - src_rgb[1]) < 25) &
-            (np.abs(b.astype(int) - src_rgb[2]) < 25) &
-            (a > 0)
-        )
-        new_arr[mask, 0] = tgt_rgb[0]
-        new_arr[mask, 1] = tgt_rgb[1]
-        new_arr[mask, 2] = tgt_rgb[2]
-        new_arr[mask, 3] = a[mask]  # Preserve original alpha/transparency
+    # Convert numerical grid from mm to inches (if values > 50, it's in mm)
+    if data.max() > 50:
+        ffg_inches = data * 0.0393701
+    else:
+        ffg_inches = data
 
-    # Save recolored overlay
-    final_img = Image.fromarray(new_arr, mode="RGBA")
-    final_img.save(png_path, format="PNG")
+    # Mask zero or out-of-bounds guidance values to maintain transparent background
+    ffg_inches = np.where(ffg_inches <= 0, np.nan, ffg_inches)
 
-    # Generate KML markup
+    # Render image canvas from exact numbers
+    fig, ax = plt.subplots(figsize=(16, 9), dpi=240)
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
+    ax.set_axis_off()
+
+    ax.pcolormesh(
+        lons, lats, ffg_inches,
+        cmap=cmap,
+        norm=norm,
+        shading='auto'
+    )
+
+    ax.set_xlim(WEST, EAST)
+    ax.set_ylim(SOUTH, NORTH)
+
+    plt.subplots_adjust(left=0, right=0, bottom=0, top=0)
+    plt.savefig(png_path, format="png", transparent=True, dpi=240)
+    plt.close()
+
+    # Generate GroundOverlay KML
     kml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Folder>
     <name>Custom Flash Flood Guidance</name>
     <GroundOverlay>
-      <name>Flash Flood Guidance</name>
+      <name>{duration_hr}-Hour FFG</name>
       <Icon>
         <href>{png_path}</href>
       </Icon>
@@ -105,15 +146,15 @@ def generate_kmz(duration_layer="show:0", output_kmz="Custom_FFG_1hr.kmz"):
     with open(kml_path, "w", encoding="utf-8") as f:
         f.write(kml_content)
 
-    # Package into KMZ archive
+    # Package into final KMZ
     with zipfile.ZipFile(output_kmz, "w", zipfile.ZIP_DEFLATED) as kmz:
         kmz.write(png_path, arcname=png_path)
         kmz.write(kml_path, arcname="doc.kml")
 
-    # Cleanup temporary local artifacts
-    for p in [raw_png, png_path, kml_path]:
+    # Cleanup temporary local files
+    for p in [grib_path, png_path, kml_path]:
         if os.path.exists(p):
             os.remove(p)
 
 if __name__ == "__main__":
-    generate_kmz("show:0", "Custom_FFG_1hr.kmz")
+    generate_kmz("01", "Custom_FFG_1hr.kmz")
