@@ -1,11 +1,11 @@
 import os
 import zipfile
+import json
 import urllib.request
-from datetime import datetime, timezone, timedelta
-import pygrib
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
+import geopandas as gpd
 
 # ------------------------------------------------------------------------------
 # 1. DOMAIN BOUNDS (Ohio Region)
@@ -34,86 +34,69 @@ colors_rgb = [
 cmap = ListedColormap(colors_rgb)
 norm = BoundaryNorm(bounds, cmap.N)
 
-def download_raw_grib(duration_hr="01", grib_path="latest_ffg.grib2"):
-    """Downloads live GRIB2 FFG from NOAA NOMADS with browser headers and date fallbacks."""
-    now = datetime.now(timezone.utc)
+def fetch_ffg_geojson(layer_id=0):
+    """Fetches pure numerical vector features directly from NOAA's public REST API."""
+    base_url = f"https://mapservices.weather.noaa.gov/vector/rest/services/precip/rfc_gridded_ffg/MapServer/{layer_id}/query"
+    params = [
+        f"geometry={WEST},{SOUTH},{EAST},{NORTH}",
+        "geometryType=esriGeometryEnvelope",
+        "inSR=4326",
+        "spatialRel=esriSpatialRelIntersects",
+        "outFields=*",
+        "returnGeometry=true",
+        "outSR=4326",
+        "f=geojson"
+    ]
+    query_url = f"{base_url}?" + "&".join(params)
+
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    req = urllib.request.Request(query_url, headers=headers)
     
-    # Try today's date first, then yesterday if run hasn't posted yet
-    dates_to_check = [now, now - timedelta(days=1)]
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': '*/*'
-    }
-
-    download_success = False
-
-    for dt in dates_to_check:
-        date_str = dt.strftime("%Y%m%d")
+    with urllib.request.urlopen(req, timeout=30) as response:
+        data = json.loads(response.read().decode('utf-8'))
         
-        # NOAA NOMADS & NWS National FFG URLs
-        urls = [
-            f"https://nomads.ncep.noaa.gov/pub/data/nccf/com/ffg/prod/ffg.{date_str}/ffg_{duration_hr}h.grib2",
-            f"https://www.wpc.ncep.noaa.gov/ffg/ffg_{duration_hr}h.grib2"
-        ]
+    return gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4326")
 
-        for url in urls:
-            try:
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=20) as response, open(grib_path, 'wb') as out_file:
-                    out_file.write(response.read())
-                
-                if os.path.exists(grib_path) and os.path.getsize(grib_path) > 5000:
-                    print(f"Successfully retrieved GRIB2 data from: {url}")
-                    download_success = True
-                    break
-            except Exception as e:
-                print(f"Failed attempt for {url}: {e}")
-                continue
-        
-        if download_success:
-            break
-
-    if not download_success:
-        raise RuntimeError("Unable to download FFG GRIB2 data from NOAA sources.")
-
-def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
-    grib_path = "latest_ffg.grib2"
+def generate_kmz(layer_id=0, duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     png_path = "ffg_overlay.png"
     kml_path = "doc.kml"
 
-    download_raw_grib(duration_hr, grib_path)
+    # 1. Fetch raw vector features containing numerical values
+    gdf = fetch_ffg_geojson(layer_id=layer_id)
 
-    # Open raw GRIB2 message using pygrib
-    grbs = pygrib.open(grib_path)
-    grb = grbs.message(1)
-    
-    data = grb.values
-    lats, lons = grb.latlons()
-    
-    # Adjust longitudes to [-180, 180]
-    lons = np.where(lons > 180, lons - 360, lons)
+    if gdf.empty:
+        raise RuntimeError("NOAA API returned no vector features for the bounding box.")
 
-    # Convert numerical grid from mm to inches (if values > 50, it's in mm)
-    if data.max() > 50:
-        ffg_inches = data * 0.0393701
+    # Identify guidance column (typically 'val', 'ffg', or 'value')
+    value_col = None
+    for col in gdf.columns:
+        if col.lower() in ['val', 'ffg', 'value', 'guidance', 'grid_code']:
+            value_col = col
+            break
+            
+    if not value_col:
+        # Fallback to first numeric column
+        value_col = gdf.select_dtypes(include=[np.number]).columns[0]
+
+    # Convert values to inches if dataset is provided in millimeters
+    if gdf[value_col].max() > 50:
+        gdf['ffg_inches'] = gdf[value_col] * 0.0393701
     else:
-        ffg_inches = data
+        gdf['ffg_inches'] = gdf[value_col]
 
-    # Mask zero or out-of-bounds guidance values to maintain transparent background
-    ffg_inches = np.where(ffg_inches <= 0, np.nan, ffg_inches)
-
-    # Render image canvas from exact numbers
+    # 2. Render vector polygons mapped directly to exact RGB thresholds
     fig, ax = plt.subplots(figsize=(16, 9), dpi=240)
     fig.patch.set_alpha(0)
     ax.patch.set_alpha(0)
     ax.set_axis_off()
 
-    ax.pcolormesh(
-        lons, lats, ffg_inches,
+    gdf.plot(
+        column='ffg_inches',
+        ax=ax,
         cmap=cmap,
         norm=norm,
-        shading='auto'
+        edgecolor='none',
+        linewidth=0
     )
 
     ax.set_xlim(WEST, EAST)
@@ -123,7 +106,7 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     plt.savefig(png_path, format="png", transparent=True, dpi=240)
     plt.close()
 
-    # Generate GroundOverlay KML
+    # 3. Build KML GroundOverlay
     kml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Folder>
@@ -146,15 +129,14 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     with open(kml_path, "w", encoding="utf-8") as f:
         f.write(kml_content)
 
-    # Package into final KMZ
+    # 4. Package into KMZ
     with zipfile.ZipFile(output_kmz, "w", zipfile.ZIP_DEFLATED) as kmz:
         kmz.write(png_path, arcname=png_path)
         kmz.write(kml_path, arcname="doc.kml")
 
-    # Cleanup temporary local files
-    for p in [grib_path, png_path, kml_path]:
+    for p in [png_path, kml_path]:
         if os.path.exists(p):
             os.remove(p)
 
 if __name__ == "__main__":
-    generate_kmz("01", "Custom_FFG_1hr.kmz")
+    generate_kmz(layer_id=0, duration_hr="01", output_kmz="Custom_FFG_1hr.kmz")
