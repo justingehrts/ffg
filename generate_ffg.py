@@ -1,7 +1,9 @@
 import os
 import gzip
 import zipfile
-import requests
+import boto3
+from botocore import UNSIGNED
+from botocore.config import Config
 import pygrib
 import numpy as np
 import matplotlib.pyplot as plt
@@ -34,37 +36,52 @@ colors_rgb = [
 cmap = ListedColormap(colors_rgb)
 norm = BoundaryNorm(bounds, cmap.N)
 
+def download_latest_mrms_from_aws(duration_hr="01", gz_path="latest_ffg.grib2.gz"):
+    """Fetches the latest MRMS FFG GRIB2 file anonymously from NOAA's AWS Open Data bucket."""
+    # Connect to S3 anonymously (no AWS credentials required)
+    s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
+    bucket_name = 'noaa-mrms-pds'
+    prefix = f'CONUS/FlashFloodGuidance_{duration_hr}H/'
+
+    # Paginate through the bucket directory to get all available files
+    paginator = s3.get_paginator('list_objects_v2')
+    pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
+    
+    all_keys = []
+    for page in pages:
+        if 'Contents' in page:
+            for obj in page['Contents']:
+                if obj['Key'].endswith('.grib2.gz'):
+                    all_keys.append(obj['Key'])
+                    
+    if not all_keys:
+        raise RuntimeError(f"No GRIB2 files found in AWS S3 bucket s3://{bucket_name}/{prefix}")
+        
+    # MRMS keys are time-stamped (e.g., MRMS_FlashFloodGuidance_01H_..._20260816-180000.grib2.gz)
+    # Sorting alphabetically naturally places the absolute newest file at the very end of the list
+    latest_key = sorted(all_keys)[-1]
+    
+    print(f"Downloading {latest_key} from AWS Open Data...")
+    s3.download_file(bucket_name, latest_key, gz_path)
+    print("Download complete.")
+
 def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     gz_path = "latest_ffg.grib2.gz"
     grib_path = "latest_ffg.grib2"
     png_path = "ffg_overlay.png"
     kml_path = "doc.kml"
 
-    url = f"https://mrms.ncep.noaa.gov/data/2D/FlashFloodGuidance_{duration_hr}H/MRMS_FlashFloodGuidance_{duration_hr}H.latest.grib2.gz"
+    # 1. Download & Decompress FFG Data
+    download_latest_mrms_from_aws(duration_hr, gz_path)
 
-    # Use a requests Session to retain User-Agent across 302 redirects
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    })
-
-    try:
-        response = session.get(url, timeout=30, allow_redirects=True)
-        response.raise_for_status()
-        with open(gz_path, 'wb') as f:
-            f.write(response.content)
-    except Exception as e:
-        raise RuntimeError(f"Failed to download MRMS FFG data: {e}")
-
-    # Decompress GZIP
     with gzip.open(gz_path, 'rb') as f_in, open(grib_path, 'wb') as f_out:
         f_out.write(f_in.read())
 
-    # Extract Raw Grid Data
+    # 2. Extract Raw Numerical Grid
     grbs = pygrib.open(grib_path)
     grb = grbs.message(1)
     
-    # Subset to Ohio domain
+    # Subset grid strictly to Ohio bounds
     try:
         data_sub, lats_sub, lons_sub = grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST+360, lon2=EAST+360)
         lons_sub = lons_sub - 360.0
@@ -73,16 +90,16 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     
     grbs.close()
 
-    # Convert millimeters to inches (MRMS is stored in mm)
+    # Convert millimeters to inches (MRMS is stored natively in mm)
     if data_sub.max() > 50:
         ffg_inches = data_sub * 0.0393701
     else:
         ffg_inches = data_sub
 
-    # Mask non-data values for full background transparency
+    # Mask zero or trace data so the background is perfectly transparent
     ffg_inches = np.where(ffg_inches <= 0.01, np.nan, ffg_inches)
 
-    # Render clean image canvas
+    # 3. Render Custom Image Canvas
     fig, ax = plt.subplots(figsize=(16, 9), dpi=240)
     fig.patch.set_alpha(0)
     ax.patch.set_alpha(0)
@@ -102,7 +119,7 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     plt.savefig(png_path, format="png", transparent=True, dpi=240)
     plt.close()
 
-    # Build KML
+    # 4. Build KML GroundOverlay
     kml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Folder>
@@ -125,12 +142,12 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     with open(kml_path, "w", encoding="utf-8") as f:
         f.write(kml_content)
 
-    # Package KMZ
+    # 5. Package KMZ
     with zipfile.ZipFile(output_kmz, "w", zipfile.ZIP_DEFLATED) as kmz:
         kmz.write(png_path, arcname=png_path)
         kmz.write(kml_path, arcname="doc.kml")
 
-    # Cleanup temporary files
+    # Cleanup temporary workspace
     for p in [gz_path, grib_path, png_path, kml_path]:
         if os.path.exists(p):
             os.remove(p)
