@@ -1,11 +1,13 @@
 import os
 import zipfile
-import json
 import urllib.request
+from datetime import datetime, timezone, timedelta
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
-import geopandas as gpd
+import rasterio
+from rasterio.mask import mask
+from shapely.geometry import box
 
 # ------------------------------------------------------------------------------
 # 1. DOMAIN BOUNDS (Ohio Region)
@@ -34,69 +36,81 @@ colors_rgb = [
 cmap = ListedColormap(colors_rgb)
 norm = BoundaryNorm(bounds, cmap.N)
 
-def fetch_ffg_geojson(layer_id=0):
-    """Fetches pure numerical vector features directly from NOAA's public REST API."""
-    base_url = f"https://mapservices.weather.noaa.gov/vector/rest/services/precip/rfc_gridded_ffg/MapServer/{layer_id}/query"
-    params = [
-        f"geometry={WEST},{SOUTH},{EAST},{NORTH}",
-        "geometryType=esriGeometryEnvelope",
-        "inSR=4326",
-        "spatialRel=esriSpatialRelIntersects",
-        "outFields=*",
-        "returnGeometry=true",
-        "outSR=4326",
-        "f=geojson"
-    ]
-    query_url = f"{base_url}?" + "&".join(params)
-
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    req = urllib.request.Request(query_url, headers=headers)
+def download_geotiff(duration_hr="01", tif_path="latest_ffg.tif"):
+    """Fetches raw GeoTIFF grid from NOAA NWS Open Data buckets."""
+    now = datetime.now(timezone.utc)
+    dates_to_check = [now, now - timedelta(days=1)]
     
-    with urllib.request.urlopen(req, timeout=30) as response:
-        data = json.loads(response.read().decode('utf-8'))
-        
-    return gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4326")
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    download_success = False
 
-def generate_kmz(layer_id=0, duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
+    for dt in dates_to_check:
+        date_str = dt.strftime("%Y%m%d")
+        
+        urls = [
+            f"https://noaa-nws-ffg-pds.s3.amazonaws.com/ffg_{date_str}/ffg_{duration_hr}h_{date_str}.tif",
+            f"https://water.weather.gov/precip/pds/ffg/ffg_{duration_hr}h.tif",
+            f"https://mesonet.agron.iastate.edu/data/raster/ffg/ffg_{duration_hr}h.tif"
+        ]
+
+        for url in urls:
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=20) as response, open(tif_path, 'wb') as out_file:
+                    out_file.write(response.read())
+                
+                if os.path.exists(tif_path) and os.path.getsize(tif_path) > 5000:
+                    print(f"Successfully retrieved GeoTIFF from: {url}")
+                    download_success = True
+                    break
+            except Exception as e:
+                print(f"Failed attempt for {url}: {e}")
+                continue
+        
+        if download_success:
+            break
+
+    if not download_success:
+        raise RuntimeError("Unable to download FFG GeoTIFF data from NOAA sources.")
+
+def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
+    tif_path = "latest_ffg.tif"
     png_path = "ffg_overlay.png"
     kml_path = "doc.kml"
 
-    # 1. Fetch raw vector features containing numerical values
-    gdf = fetch_ffg_geojson(layer_id=layer_id)
+    download_geotiff(duration_hr, tif_path)
 
-    if gdf.empty:
-        raise RuntimeError("NOAA API returned no vector features for the bounding box.")
+    # Open GeoTIFF grid with rasterio
+    with rasterio.open(tif_path) as src:
+        # Crop data array directly to Ohio bounding box
+        bbox_geom = [box(WEST, SOUTH, EAST, NORTH)]
+        out_image, out_transform = mask(src, bbox_geom, crop=True)
+        data = out_image[0].astype(float)
+        
+        # Mask out-of-bounds/nodata pixels
+        if src.nodata is not None:
+            data[data == src.nodata] = np.nan
+        data[data <= 0] = np.nan
 
-    # Identify guidance column (typically 'val', 'ffg', or 'value')
-    value_col = None
-    for col in gdf.columns:
-        if col.lower() in ['val', 'ffg', 'value', 'guidance', 'grid_code']:
-            value_col = col
-            break
-            
-    if not value_col:
-        # Fallback to first numeric column
-        value_col = gdf.select_dtypes(include=[np.number]).columns[0]
+        # Convert mm to inches if dataset is in millimeters
+        if np.nanmax(data) > 50:
+            ffg_inches = data * 0.0393701
+        else:
+            ffg_inches = data
 
-    # Convert values to inches if dataset is provided in millimeters
-    if gdf[value_col].max() > 50:
-        gdf['ffg_inches'] = gdf[value_col] * 0.0393701
-    else:
-        gdf['ffg_inches'] = gdf[value_col]
-
-    # 2. Render vector polygons mapped directly to exact RGB thresholds
+    # Render clean raster overlay with exact color thresholds
     fig, ax = plt.subplots(figsize=(16, 9), dpi=240)
     fig.patch.set_alpha(0)
     ax.patch.set_alpha(0)
     ax.set_axis_off()
 
-    gdf.plot(
-        column='ffg_inches',
-        ax=ax,
+    ax.imshow(
+        ffg_inches,
         cmap=cmap,
         norm=norm,
-        edgecolor='none',
-        linewidth=0
+        extent=[WEST, EAST, SOUTH, NORTH],
+        origin='upper',
+        interpolation='nearest'
     )
 
     ax.set_xlim(WEST, EAST)
@@ -106,7 +120,7 @@ def generate_kmz(layer_id=0, duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     plt.savefig(png_path, format="png", transparent=True, dpi=240)
     plt.close()
 
-    # 3. Build KML GroundOverlay
+    # Generate GroundOverlay KML
     kml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Folder>
@@ -129,14 +143,14 @@ def generate_kmz(layer_id=0, duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
     with open(kml_path, "w", encoding="utf-8") as f:
         f.write(kml_content)
 
-    # 4. Package into KMZ
+    # Package into KMZ
     with zipfile.ZipFile(output_kmz, "w", zipfile.ZIP_DEFLATED) as kmz:
         kmz.write(png_path, arcname=png_path)
         kmz.write(kml_path, arcname="doc.kml")
 
-    for p in [png_path, kml_path]:
+    for p in [tif_path, png_path, kml_path]:
         if os.path.exists(p):
             os.remove(p)
 
 if __name__ == "__main__":
-    generate_kmz(layer_id=0, duration_hr="01", output_kmz="Custom_FFG_1hr.kmz")
+    generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz")
