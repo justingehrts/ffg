@@ -2,8 +2,8 @@ name: Generate Custom FFG KMZ
 
 on:
   schedule:
-    - cron: '15 * * * *'  # Runs automatically every hour at :15
-  workflow_dispatch:      # Manual trigger
+    - cron: '15 * * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,14 +28,9 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libeccodes-dev
-
       - name: Install Python Packages
         run: |
-          pip install pygrib numpy matplotlib
+          pip install Pillow numpy
 
       - name: Generate Custom KMZ
         run: python generate_ffg.py
