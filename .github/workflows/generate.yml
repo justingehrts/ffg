@@ -1,9 +1,7 @@
 name: Generate Custom FFG KMZ
 
 on:
-  schedule:
-    - cron: '15 * * * *'
-  workflow_dispatch:
+  workflow_dispatch:  # <--- Only runs when you manually click the button
 
 permissions:
   contents: read
@@ -28,9 +26,14 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libeccodes-dev
+
       - name: Install Python Packages
         run: |
-          pip install rasterio matplotlib numpy
+          pip install pygrib numpy matplotlib
 
       - name: Generate Custom KMZ
         run: python generate_ffg.py
