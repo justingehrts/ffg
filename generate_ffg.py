@@ -1,9 +1,6 @@
 import os
-import gzip
 import zipfile
-import boto3
-from botocore import UNSIGNED
-from botocore.config import Config
+import urllib.request
 import pygrib
 import numpy as np
 import matplotlib.pyplot as plt
@@ -36,67 +33,51 @@ colors_rgb = [
 cmap = ListedColormap(colors_rgb)
 norm = BoundaryNorm(bounds, cmap.N)
 
-def download_latest_mrms_from_aws(duration_hr="01", gz_path="latest_ffg.grib2.gz"):
-    """Fetches the latest MRMS FFG GRIB2 file anonymously from NOAA's AWS Open Data bucket."""
-    # Connect to S3 anonymously (no AWS credentials required)
-    s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
-    bucket_name = 'noaa-mrms-pds'
-    prefix = f'CONUS/FlashFloodGuidance_{duration_hr}H/'
-
-    # Paginate through the bucket directory to get all available files
-    paginator = s3.get_paginator('list_objects_v2')
-    pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
-    
-    all_keys = []
-    for page in pages:
-        if 'Contents' in page:
-            for obj in page['Contents']:
-                if obj['Key'].endswith('.grib2.gz'):
-                    all_keys.append(obj['Key'])
-                    
-    if not all_keys:
-        raise RuntimeError(f"No GRIB2 files found in AWS S3 bucket s3://{bucket_name}/{prefix}")
-        
-    # MRMS keys are time-stamped (e.g., MRMS_FlashFloodGuidance_01H_..._20260816-180000.grib2.gz)
-    # Sorting alphabetically naturally places the absolute newest file at the very end of the list
-    latest_key = sorted(all_keys)[-1]
-    
-    print(f"Downloading {latest_key} from AWS Open Data...")
-    s3.download_file(bucket_name, latest_key, gz_path)
-    print("Download complete.")
-
-def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
-    gz_path = "latest_ffg.grib2.gz"
-    grib_path = "latest_ffg.grib2"
+def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
+    bin_path = "ds.ffg.bin"
     png_path = "ffg_overlay.png"
     kml_path = "doc.kml"
 
-    # 1. Download & Decompress FFG Data
-    download_latest_mrms_from_aws(duration_hr, gz_path)
-
-    with gzip.open(gz_path, 'rb') as f_in, open(grib_path, 'wb') as f_out:
-        f_out.write(f_in.read())
+    # 1. Download official NWS RFC FFG GRIB2 file from TGFTP
+    # This static URL continuously updates with the latest national guidance and does not block automated agents.
+    url = "https://tgftp.nws.noaa.gov/SL.us008001/ST.opnl/DF.gr2/DC.ndfd/AR.conus/VP.001-003/ds.ffg.bin"
+    
+    print("Downloading NWS Flash Flood Guidance...")
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req, timeout=30) as response, open(bin_path, 'wb') as out_file:
+        out_file.write(response.read())
+    print("Download complete.")
 
     # 2. Extract Raw Numerical Grid
-    grbs = pygrib.open(grib_path)
-    grb = grbs.message(1)
+    grbs = pygrib.open(bin_path)
     
+    # The file contains 1-hour and 3-hour forecast grids. Grab the 1-hour.
+    target_grb = None
+    for g in grbs:
+        print(f"Found Grid: {g.name}, stepRange: {g.stepRange}")
+        if '1' in str(g.stepRange):
+            target_grb = g
+            break
+            
+    if not target_grb:
+        target_grb = grbs.message(1) # Safe fallback
+
     # Subset grid strictly to Ohio bounds
     try:
-        data_sub, lats_sub, lons_sub = grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST+360, lon2=EAST+360)
+        data_sub, lats_sub, lons_sub = target_grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST+360, lon2=EAST+360)
         lons_sub = lons_sub - 360.0
     except Exception:
-        data_sub, lats_sub, lons_sub = grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST, lon2=EAST)
+        data_sub, lats_sub, lons_sub = target_grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST, lon2=EAST)
     
     grbs.close()
 
-    # Convert millimeters to inches (MRMS is stored natively in mm)
+    # Convert native metric measurements to inches
     if data_sub.max() > 50:
         ffg_inches = data_sub * 0.0393701
     else:
         ffg_inches = data_sub
 
-    # Mask zero or trace data so the background is perfectly transparent
+    # Mask zero/trace data so the background is perfectly transparent over the map
     ffg_inches = np.where(ffg_inches <= 0.01, np.nan, ffg_inches)
 
     # 3. Render Custom Image Canvas
@@ -125,7 +106,7 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
   <Folder>
     <name>Custom Flash Flood Guidance</name>
     <GroundOverlay>
-      <name>{duration_hr}-Hour FFG</name>
+      <name>1-Hour FFG</name>
       <Icon>
         <href>{png_path}</href>
       </Icon>
@@ -148,9 +129,9 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
         kmz.write(kml_path, arcname="doc.kml")
 
     # Cleanup temporary workspace
-    for p in [gz_path, grib_path, png_path, kml_path]:
+    for p in [bin_path, png_path, kml_path]:
         if os.path.exists(p):
             os.remove(p)
 
 if __name__ == "__main__":
-    generate_kmz("01", "Custom_FFG_1hr.kmz")
+    generate_kmz("Custom_FFG_1hr.kmz")
