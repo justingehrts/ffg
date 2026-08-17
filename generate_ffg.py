@@ -1,6 +1,7 @@
 import os
+import re
 import zipfile
-import urllib.request
+import requests
 import pygrib
 import numpy as np
 import matplotlib.pyplot as plt
@@ -33,51 +34,64 @@ colors_rgb = [
 cmap = ListedColormap(colors_rgb)
 norm = BoundaryNorm(bounds, cmap.N)
 
-def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
-    bin_path = "ds.ffg.bin"
+def download_latest_wpc_grib(duration_hr="01", out_path="latest_ffg.grib2"):
+    """Scrapes the WPC FTP/HTTP directory to dynamically find and download the latest run."""
+    base_url = "https://ftp.wpc.ncep.noaa.gov/ffg/"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    
+    print(f"Scraping {base_url} for the latest {duration_hr}-hour FFG GRIB2...")
+    response = requests.get(base_url, headers=headers, timeout=15)
+    response.raise_for_status()
+
+    # Regex to extract any file containing '01h' and ending in '.grib2'
+    pattern = rf'href="([^"]*?01[hH][^"]*?\.grib2)"'
+    matches = re.findall(pattern, response.text, re.IGNORECASE)
+
+    if not matches:
+        raise RuntimeError(f"No GRIB2 files found matching {duration_hr}H in {base_url}")
+
+    # Sorting alphabetically naturally places the most recent timestamp string at the end
+    latest_filename = sorted(list(set(matches)))[-1]
+    file_url = base_url + latest_filename
+
+    print(f"Found latest file: {latest_filename}")
+    print(f"Downloading from {file_url}...")
+    
+    resp = requests.get(file_url, headers=headers, timeout=30)
+    resp.raise_for_status()
+    
+    with open(out_path, 'wb') as f:
+        f.write(resp.content)
+    print("Download complete.")
+
+def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
+    grib_path = "latest_ffg.grib2"
     png_path = "ffg_overlay.png"
     kml_path = "doc.kml"
 
-    # 1. Download official NWS RFC FFG GRIB2 file from TGFTP
-    # This static URL continuously updates with the latest national guidance and does not block automated agents.
-    url = "https://tgftp.nws.noaa.gov/SL.us008001/ST.opnl/DF.gr2/DC.ndfd/AR.conus/VP.001-003/ds.ffg.bin"
-    
-    print("Downloading NWS Flash Flood Guidance...")
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-    with urllib.request.urlopen(req, timeout=30) as response, open(bin_path, 'wb') as out_file:
-        out_file.write(response.read())
-    print("Download complete.")
+    # 1. Download Dynamic GRIB2
+    download_latest_wpc_grib(duration_hr, grib_path)
 
     # 2. Extract Raw Numerical Grid
-    grbs = pygrib.open(bin_path)
+    grbs = pygrib.open(grib_path)
+    grb = grbs.message(1)
     
-    # The file contains 1-hour and 3-hour forecast grids. Grab the 1-hour.
-    target_grb = None
-    for g in grbs:
-        print(f"Found Grid: {g.name}, stepRange: {g.stepRange}")
-        if '1' in str(g.stepRange):
-            target_grb = g
-            break
-            
-    if not target_grb:
-        target_grb = grbs.message(1) # Safe fallback
-
     # Subset grid strictly to Ohio bounds
     try:
-        data_sub, lats_sub, lons_sub = target_grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST+360, lon2=EAST+360)
+        data_sub, lats_sub, lons_sub = grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST+360, lon2=EAST+360)
         lons_sub = lons_sub - 360.0
     except Exception:
-        data_sub, lats_sub, lons_sub = target_grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST, lon2=EAST)
+        data_sub, lats_sub, lons_sub = grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST, lon2=EAST)
     
     grbs.close()
 
-    # Convert native metric measurements to inches
+    # Convert millimeters to inches if necessary
     if data_sub.max() > 50:
         ffg_inches = data_sub * 0.0393701
     else:
         ffg_inches = data_sub
 
-    # Mask zero/trace data so the background is perfectly transparent over the map
+    # Mask zero or trace data so the background is perfectly transparent
     ffg_inches = np.where(ffg_inches <= 0.01, np.nan, ffg_inches)
 
     # 3. Render Custom Image Canvas
@@ -106,7 +120,7 @@ def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
   <Folder>
     <name>Custom Flash Flood Guidance</name>
     <GroundOverlay>
-      <name>1-Hour FFG</name>
+      <name>{duration_hr}-Hour FFG</name>
       <Icon>
         <href>{png_path}</href>
       </Icon>
@@ -129,9 +143,9 @@ def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
         kmz.write(kml_path, arcname="doc.kml")
 
     # Cleanup temporary workspace
-    for p in [bin_path, png_path, kml_path]:
+    for p in [grib_path, png_path, kml_path]:
         if os.path.exists(p):
             os.remove(p)
 
 if __name__ == "__main__":
-    generate_kmz("Custom_FFG_1hr.kmz")
+    generate_kmz("01", "Custom_FFG_1hr.kmz")
