@@ -51,7 +51,7 @@ def download_latest_iem_grib(out_path="latest_ffg.grib2"):
             if response.status_code != 200:
                 continue
                 
-            # Regex to match the official 5km gridded FFG files (e.g., 5kmffg_2026081612.grib2)
+            # Regex to match the official 5km gridded FFG files
             matches = re.findall(r'href="([^"]*5kmffg_[^"]*\.grib2)"', response.text, re.IGNORECASE)
             
             if matches:
@@ -97,21 +97,22 @@ def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
     if not target_grb:
         target_grb = grbs.message(1) # Safe fallback
 
-    # Subset grid strictly to Ohio bounds
-    try:
-        data_sub, lats_sub, lons_sub = target_grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST+360, lon2=EAST+360)
-        lons_sub = lons_sub - 360.0
-    except Exception:
-        data_sub, lats_sub, lons_sub = target_grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST, lon2=EAST)
+    # Load the entire 2D grid instead of subsetting, which prevents flattening 
+    # non-regular grids into 1D arrays. Matplotlib will handle the geographic crop.
+    data_full = target_grb.values
+    lats_full, lons_full = target_grb.latlons()
+    
+    # Ensure longitudes are on a -180 to 180 scale
+    lons_full = np.where(lons_full > 180, lons_full - 360, lons_full)
     
     grbs.close()
 
     # Convert native metric measurements to inches
     if getattr(target_grb, 'parameterUnits', '') == 'm':
-        ffg_inches = data_sub * 39.3701
+        ffg_inches = data_full * 39.3701
     else:
         # FFG defaults to kg m-2 (millimeters)
-        ffg_inches = data_sub * 0.0393701
+        ffg_inches = data_full * 0.0393701
 
     # Flatten out masked arrays and explicitly set zeros to NaN for transparency
     if np.ma.isMaskedArray(ffg_inches):
@@ -126,12 +127,13 @@ def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
     ax.set_axis_off()
 
     ax.pcolormesh(
-        lons_sub, lats_sub, ffg_inches,
+        lons_full, lats_full, ffg_inches,
         cmap=cmap,
         norm=norm,
         shading='auto'
     )
 
+    # Crop the render strictly to the Ohio bounds
     ax.set_xlim(WEST, EAST)
     ax.set_ylim(SOUTH, NORTH)
 
