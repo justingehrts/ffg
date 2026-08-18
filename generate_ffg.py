@@ -1,5 +1,6 @@
 import os
 import re
+import datetime
 import zipfile
 import requests
 import pygrib
@@ -34,64 +35,88 @@ colors_rgb = [
 cmap = ListedColormap(colors_rgb)
 norm = BoundaryNorm(bounds, cmap.N)
 
-def download_latest_wpc_grib(duration_hr="01", out_path="latest_ffg.grib2"):
-    """Scrapes the WPC FTP/HTTP directory to dynamically find and download the latest run."""
-    base_url = "https://ftp.wpc.ncep.noaa.gov/ffg/"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+def download_latest_iem_grib(out_path="latest_ffg.grib2"):
+    """Scrapes the IEM academic archive to dynamically find and download the latest NWS FFG run."""
+    now = datetime.datetime.utcnow()
+    headers = {'User-Agent': 'Custom-FFG-Generator/1.0'}
     
-    print(f"Scraping {base_url} for the latest {duration_hr}-hour FFG GRIB2...")
-    response = requests.get(base_url, headers=headers, timeout=15)
-    response.raise_for_status()
+    # Iterate through today and the past two days to ensure we find the latest file
+    for offset in [0, 1, 2]:
+        dt = now - datetime.timedelta(days=offset)
+        base_url = f"https://mesonet.agron.iastate.edu/archive/data/{dt.strftime('%Y/%m/%d')}/model/ffg/"
+        print(f"Checking {base_url} ...")
+        
+        try:
+            response = requests.get(base_url, headers=headers, timeout=15)
+            if response.status_code != 200:
+                continue
+                
+            # Regex to match the official 5km gridded FFG files (e.g., 5kmffg_2026081612.grib2)
+            matches = re.findall(r'href="([^"]*5kmffg_[^"]*\.grib2)"', response.text, re.IGNORECASE)
+            
+            if matches:
+                # Alphabetical sort guarantees the latest timestamp is at the end of the list
+                latest_filename = sorted(list(set(matches)))[-1]
+                file_url = base_url + latest_filename
+                
+                print(f"Found latest file: {latest_filename}")
+                print(f"Downloading from {file_url}...")
+                
+                resp = requests.get(file_url, headers=headers, timeout=30)
+                resp.raise_for_status()
+                
+                with open(out_path, 'wb') as f:
+                    f.write(resp.content)
+                print("Download complete.")
+                return
+                
+        except Exception as e:
+            print(f"Error while checking {base_url}: {e}")
+            
+    raise RuntimeError("Could not find any FFG GRIB2 files in the IEM archive for the past 3 days.")
 
-    # Regex to extract any file containing '01h' and ending in '.grib2'
-    pattern = rf'href="([^"]*?01[hH][^"]*?\.grib2)"'
-    matches = re.findall(pattern, response.text, re.IGNORECASE)
-
-    if not matches:
-        raise RuntimeError(f"No GRIB2 files found matching {duration_hr}H in {base_url}")
-
-    # Sorting alphabetically naturally places the most recent timestamp string at the end
-    latest_filename = sorted(list(set(matches)))[-1]
-    file_url = base_url + latest_filename
-
-    print(f"Found latest file: {latest_filename}")
-    print(f"Downloading from {file_url}...")
-    
-    resp = requests.get(file_url, headers=headers, timeout=30)
-    resp.raise_for_status()
-    
-    with open(out_path, 'wb') as f:
-        f.write(resp.content)
-    print("Download complete.")
-
-def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
+def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
     grib_path = "latest_ffg.grib2"
     png_path = "ffg_overlay.png"
     kml_path = "doc.kml"
 
-    # 1. Download Dynamic GRIB2
-    download_latest_wpc_grib(duration_hr, grib_path)
+    # 1. Download Dynamic GRIB2 from IEM
+    download_latest_iem_grib(grib_path)
 
     # 2. Extract Raw Numerical Grid
     grbs = pygrib.open(grib_path)
-    grb = grbs.message(1)
     
+    # 5kmffg files usually contain multiple hour steps; find the 1-hour grid
+    target_grb = None
+    for g in grbs:
+        print(f"Discovered Grid: {g.name}, stepRange: {g.stepRange}, units: {g.parameterUnits}")
+        if '1' in str(g.stepRange):
+            target_grb = g
+            break
+            
+    if not target_grb:
+        target_grb = grbs.message(1) # Safe fallback
+
     # Subset grid strictly to Ohio bounds
     try:
-        data_sub, lats_sub, lons_sub = grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST+360, lon2=EAST+360)
+        data_sub, lats_sub, lons_sub = target_grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST+360, lon2=EAST+360)
         lons_sub = lons_sub - 360.0
     except Exception:
-        data_sub, lats_sub, lons_sub = grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST, lon2=EAST)
+        data_sub, lats_sub, lons_sub = target_grb.data(lat1=SOUTH, lat2=NORTH, lon1=WEST, lon2=EAST)
     
     grbs.close()
 
-    # Convert millimeters to inches if necessary
-    if data_sub.max() > 50:
-        ffg_inches = data_sub * 0.0393701
+    # Convert native metric measurements to inches
+    if getattr(target_grb, 'parameterUnits', '') == 'm':
+        ffg_inches = data_sub * 39.3701
     else:
-        ffg_inches = data_sub
+        # FFG defaults to kg m-2 (millimeters)
+        ffg_inches = data_sub * 0.0393701
 
-    # Mask zero or trace data so the background is perfectly transparent
+    # Flatten out masked arrays and explicitly set zeros to NaN for transparency
+    if np.ma.isMaskedArray(ffg_inches):
+        ffg_inches = np.ma.filled(ffg_inches, fill_value=np.nan)
+        
     ffg_inches = np.where(ffg_inches <= 0.01, np.nan, ffg_inches)
 
     # 3. Render Custom Image Canvas
@@ -120,7 +145,7 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
   <Folder>
     <name>Custom Flash Flood Guidance</name>
     <GroundOverlay>
-      <name>{duration_hr}-Hour FFG</name>
+      <name>1-Hour FFG</name>
       <Icon>
         <href>{png_path}</href>
       </Icon>
@@ -148,4 +173,4 @@ def generate_kmz(duration_hr="01", output_kmz="Custom_FFG_1hr.kmz"):
             os.remove(p)
 
 if __name__ == "__main__":
-    generate_kmz("01", "Custom_FFG_1hr.kmz")
+    generate_kmz("Custom_FFG_1hr.kmz")
