@@ -33,7 +33,7 @@ jobs:
 
       - name: Install Python Packages
         run: |
-          pip install pygrib numpy matplotlib requests
+          pip install pygrib numpy matplotlib requests pyproj
 
       - name: Generate Custom KMZ
         run: python generate_ffg.py
