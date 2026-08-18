@@ -111,14 +111,12 @@ def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
     ffg_inches = np.where(ffg_inches <= 0.01, np.nan, ffg_inches)
 
     # 3. Apply NaN-Aware Gaussian Smoothing for Broadcast Graphics
-    # We must smooth the data and the mask separately to prevent the zeros/NaNs 
-    # from dragging down the actual guidance numbers along the state edges.
     valid_mask = ~np.isnan(ffg_inches)
     data_filled = np.copy(ffg_inches)
     data_filled[~valid_mask] = 0.0
 
-    # Sigma 1.2 is the sweet spot: smooths jagged edges without losing representative data
-    sigma = 1.2 
+    # LOWERED SIGMA: 0.6 rounds the corners without blowing out the structural detail
+    sigma = 0.6 
     smoothed_data = ndimage.gaussian_filter(data_filled, sigma=sigma)
     smoothed_mask = ndimage.gaussian_filter(valid_mask.astype(float), sigma=sigma)
 
