@@ -100,13 +100,15 @@ def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
     ax.patch.set_alpha(0)
     ax.set_axis_off()
 
-    # pcolormesh handles polar stereographic coordinates accurately 
-    # when lat/lon mesh grids are passed directly
-    ax.pcolormesh(
+    # Use contourf instead of pcolormesh to create smooth, broadcast-ready isopleths
+    # rather than rendering the jagged 5km data blocks.
+    ax.contourf(
         lons_full, lats_full, ffg_inches,
+        levels=bounds,
         cmap=cmap,
         norm=norm,
-        shading='auto'
+        extend='max',
+        antialiased=True
     )
 
     # Crop precisely to bounding box
