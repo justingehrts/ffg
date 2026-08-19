@@ -1,7 +1,9 @@
 name: Generate Custom FFG KMZ
 
 on:
-  workflow_dispatch:
+  schedule:
+    - cron: '15 * * * *'  # Runs at 15 minutes past every hour
+  workflow_dispatch:      # Allows you to still trigger it manually
 
 permissions:
   contents: read
