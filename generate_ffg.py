@@ -17,22 +17,20 @@ WEST, SOUTH, EAST, NORTH = -85.0, 38.0, -80.0, 42.0
 # ------------------------------------------------------------------------------
 # 2. EXACT COLOR PALETTE & THRESHOLD BREAKS (Inches)
 # ------------------------------------------------------------------------------
-# Universal scale across 1-hr, 3-hr, and 6-hr durations
-bounds = [0.0, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00, 2.50, 3.00, 4.00, 5.00, 10.0]
+# 9-Tier Universal scale across 1-hr, 3-hr, and 6-hr durations
+bounds = [0.0, 0.50, 0.75, 1.00, 1.50, 2.00, 3.00, 4.00, 5.00, 10.0]
 
-# CVD-Safe Diverging Scheme (RdYlBu / Red -> Yellow -> Blue)
+# CVD-Safe Perceptually Uniform Sequential (Crimson -> Cream/Grey)
 colors_rgb = [
-    (103/255,   0/255,  31/255),  # < 0.25" (Dark Blood Red - Highest Threat)
-    (178/255,  24/255,  43/255),  # 0.25" - 0.50" (Deep Crimson)
-    (214/255,  96/255,  77/255),  # 0.50" - 0.75" (Muted Red)
-    (244/255, 165/255, 130/255),  # 0.75" - 1.00" (Soft Coral)
-    (253/255, 219/255, 199/255),  # 1.00" - 1.50" (Pale Peach)
-    (254/255, 224/255, 144/255),  # 1.50" - 2.00" (Soft Warm Yellow)
-    (224/255, 243/255, 248/255),  # 2.00" - 2.50" (Very Ice Blue)
-    (146/255, 197/255, 222/255),  # 2.50" - 3.00" (Light Blue)
-    (67/255,  147/255, 195/255),  # 3.00" - 4.00" (Medium Blue)
-    (33/255,  102/255, 172/255),  # 4.00" - 5.00" (Strong Blue)
-    (5/255,    48/255,  97/255)   # >= 5.00" (Dark Navy - Lowest Threat)
+    (103/255,   0/255,  13/255),  # < 0.50"       (Very Dark Crimson)
+    (165/255,  15/255,  21/255),  # 0.50" - 0.75" (Deep Red)
+    (203/255,  24/255,  29/255),  # 0.75" - 1.00" (Strong Red)
+    (239/255,  59/255,  44/255),  # 1.00" - 1.50" (Vibrant Red)
+    (251/255, 106/255,  74/255),  # 1.50" - 2.00" (Orange-Red)
+    (252/255, 146/255, 114/255),  # 2.00" - 3.00" (Soft Orange/Peach)
+    (254/255, 224/255, 210/255),  # 3.00" - 4.00" (Pale Peach)
+    (255/255, 245/255, 240/255),  # 4.00" - 5.00" (Cream)
+    (217/255, 217/255, 217/255)   # >= 5.00"      (Light Grey)
 ]
 
 cmap = ListedColormap(colors_rgb)
