@@ -17,22 +17,22 @@ WEST, SOUTH, EAST, NORTH = -85.0, 38.0, -80.0, 42.0
 # ------------------------------------------------------------------------------
 # 2. EXACT COLOR PALETTE & THRESHOLD BREAKS (Inches)
 # ------------------------------------------------------------------------------
-# Using a Universal / Static scale across all durations
+# Universal scale across 1-hr, 3-hr, and 6-hr durations
 bounds = [0.0, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00, 2.50, 3.00, 4.00, 5.00, 10.0]
 
-# CVD-Safe Perceptually Uniform Sequential (Crimson -> Cream/Grey)
+# CVD-Safe Diverging Scheme (RdYlBu / Red -> Yellow -> Blue)
 colors_rgb = [
-    (103/255,   0/255,  13/255),  # < 0.25" (Very Dark Crimson)
-    (165/255,  15/255,  21/255),  # 0.25" - 0.50" (Deep Red)
-    (203/255,  24/255,  29/255),  # 0.50" - 0.75" (Strong Red)
-    (239/255,  59/255,  44/255),  # 0.75" - 1.00" (Vibrant Red)
-    (251/255, 106/255,  74/255),  # 1.00" - 1.50" (Orange-Red)
-    (252/255, 146/255, 114/255),  # 1.50" - 2.00" (Soft Orange)
-    (252/255, 187/255, 161/255),  # 2.00" - 2.50" (Peach)
-    (254/255, 224/255, 210/255),  # 2.50" - 3.00" (Pale Peach)
-    (255/255, 245/255, 240/255),  # 3.00" - 4.00" (Cream)
-    (240/255, 240/255, 240/255),  # 4.00" - 5.00" (Very Light Grey)
-    (217/255, 217/255, 217/255)   # >= 5.00" (Light Grey)
+    (103/255,   0/255,  31/255),  # < 0.25" (Dark Blood Red - Highest Threat)
+    (178/255,  24/255,  43/255),  # 0.25" - 0.50" (Deep Crimson)
+    (214/255,  96/255,  77/255),  # 0.50" - 0.75" (Muted Red)
+    (244/255, 165/255, 130/255),  # 0.75" - 1.00" (Soft Coral)
+    (253/255, 219/255, 199/255),  # 1.00" - 1.50" (Pale Peach)
+    (254/255, 224/255, 144/255),  # 1.50" - 2.00" (Soft Warm Yellow)
+    (224/255, 243/255, 248/255),  # 2.00" - 2.50" (Very Ice Blue)
+    (146/255, 197/255, 222/255),  # 2.50" - 3.00" (Light Blue)
+    (67/255,  147/255, 195/255),  # 3.00" - 4.00" (Medium Blue)
+    (33/255,  102/255, 172/255),  # 4.00" - 5.00" (Strong Blue)
+    (5/255,    48/255,  97/255)   # >= 5.00" (Dark Navy - Lowest Threat)
 ]
 
 cmap = ListedColormap(colors_rgb)
@@ -81,7 +81,7 @@ def process_and_render_grid(target_grb, duration_hr):
     lats_full, lons_full = target_grb.latlons()
     lons_full = np.where(lons_full > 180, lons_full - 360, lons_full)
 
-    # Convert metric to inches
+    # Convert metric measurements to inches
     if getattr(target_grb, 'parameterUnits', '') == 'm':
         ffg_inches = data_full * 39.3701
     else:
@@ -92,7 +92,7 @@ def process_and_render_grid(target_grb, duration_hr):
         
     ffg_inches = np.where(ffg_inches <= 0.01, np.nan, ffg_inches)
 
-    # Apply NaN-Aware Gaussian Smoothing (sigma=0.6 for broadcast polish)
+    # Apply NaN-Aware Gaussian Smoothing (sigma=0.6)
     valid_mask = ~np.isnan(ffg_inches)
     data_filled = np.copy(ffg_inches)
     data_filled[~valid_mask] = 0.0
@@ -104,7 +104,7 @@ def process_and_render_grid(target_grb, duration_hr):
     ffg_smoothed = smoothed_data / np.clip(smoothed_mask, 1e-8, 1.0)
     ffg_smoothed[~valid_mask] = np.nan
 
-    # Render Image
+    # Render Image Canvas
     fig, ax = plt.subplots(figsize=(16, 9), dpi=240)
     fig.patch.set_alpha(0)
     ax.patch.set_alpha(0)
@@ -126,7 +126,7 @@ def process_and_render_grid(target_grb, duration_hr):
     plt.savefig(png_path, format="png", transparent=True, dpi=240)
     plt.close()
 
-    # Build KML
+    # Build KML GroundOverlay
     kml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Folder>
@@ -166,7 +166,7 @@ def generate_all_kmzs():
 
     grbs = pygrib.open(grib_path)
     
-    # Isolate the 1hr, 3hr, and 6hr messages
+    # Extract 1hr, 3hr, and 6hr duration grids
     target_grids = {}
     for g in grbs:
         step = str(g.stepRange)
