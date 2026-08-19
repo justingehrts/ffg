@@ -17,27 +17,28 @@ WEST, SOUTH, EAST, NORTH = -85.0, 38.0, -80.0, 42.0
 # ------------------------------------------------------------------------------
 # 2. EXACT COLOR PALETTE & THRESHOLD BREAKS (Inches)
 # ------------------------------------------------------------------------------
+# Using a Universal / Static scale across all durations
 bounds = [0.0, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00, 2.50, 3.00, 4.00, 5.00, 10.0]
 
+# CVD-Safe Perceptually Uniform Sequential (Crimson -> Cream/Grey)
 colors_rgb = [
-    (125/255,   1/255,  18/255),  # < 0.25"
-    (154/255,  42/255,  77/255),  # 0.25" - 0.50"
-    (179/255,  74/255, 120/255),  # 0.50" - 0.75"
-    (179/255,  74/255, 120/255),  # 0.75" - 1.00"
-    (199/255, 106/255, 158/255),  # 1.00" - 1.50"
-    (214/255, 138/255, 190/255),  # 1.50" - 2.00"
-    (225/255, 168/255, 217/255),  # 2.00" - 2.50"
-    (225/255, 168/255, 217/255),  # 2.50" - 3.00"
-    (233/255, 196/255, 238/255),  # 3.00" - 4.00"
-    (239/255, 221/255, 250/255),  # 4.00" - 5.00"
-    (242/255, 240/255, 246/255)   # >= 5.00"
+    (103/255,   0/255,  13/255),  # < 0.25" (Very Dark Crimson)
+    (165/255,  15/255,  21/255),  # 0.25" - 0.50" (Deep Red)
+    (203/255,  24/255,  29/255),  # 0.50" - 0.75" (Strong Red)
+    (239/255,  59/255,  44/255),  # 0.75" - 1.00" (Vibrant Red)
+    (251/255, 106/255,  74/255),  # 1.00" - 1.50" (Orange-Red)
+    (252/255, 146/255, 114/255),  # 1.50" - 2.00" (Soft Orange)
+    (252/255, 187/255, 161/255),  # 2.00" - 2.50" (Peach)
+    (254/255, 224/255, 210/255),  # 2.50" - 3.00" (Pale Peach)
+    (255/255, 245/255, 240/255),  # 3.00" - 4.00" (Cream)
+    (240/255, 240/255, 240/255),  # 4.00" - 5.00" (Very Light Grey)
+    (217/255, 217/255, 217/255)   # >= 5.00" (Light Grey)
 ]
 
 cmap = ListedColormap(colors_rgb)
 norm = BoundaryNorm(bounds, cmap.N)
 
 def download_latest_iem_grib(out_path="latest_ffg.grib2"):
-    """Scrapes the IEM archive to dynamically find and download the latest NWS FFG run."""
     now = datetime.datetime.utcnow()
     headers = {'User-Agent': 'Custom-FFG-Generator/1.0'}
     
@@ -58,8 +59,6 @@ def download_latest_iem_grib(out_path="latest_ffg.grib2"):
                 file_url = base_url + latest_filename
                 
                 print(f"Found latest file: {latest_filename}")
-                print(f"Downloading from {file_url}...")
-                
                 resp = requests.get(file_url, headers=headers, timeout=30)
                 resp.raise_for_status()
                 
@@ -71,35 +70,18 @@ def download_latest_iem_grib(out_path="latest_ffg.grib2"):
         except Exception as e:
             print(f"Error while checking {base_url}: {e}")
             
-    raise RuntimeError("Could not find any FFG GRIB2 files in the IEM archive for the past 3 days.")
+    raise RuntimeError("Could not find any FFG GRIB2 files.")
 
-def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
-    grib_path = "latest_ffg.grib2"
-    png_path = "ffg_overlay.png"
-    kml_path = "doc.kml"
-
-    # 1. Download Dynamic GRIB2 from IEM
-    download_latest_iem_grib(grib_path)
-
-    # 2. Extract Raw Numerical Grid
-    grbs = pygrib.open(grib_path)
-    
-    target_grb = None
-    for g in grbs:
-        print(f"Discovered Grid: {g.name}, stepRange: {g.stepRange}, units: {g.parameterUnits}")
-        if '1' in str(g.stepRange):
-            target_grb = g
-            break
-            
-    if not target_grb:
-        target_grb = grbs.message(1)
+def process_and_render_grid(target_grb, duration_hr):
+    png_path = f"ffg_overlay_{duration_hr}hr.png"
+    kml_path = f"doc_{duration_hr}hr.kml"
+    output_kmz = f"Custom_FFG_{duration_hr}hr.kmz"
 
     data_full = target_grb.values
     lats_full, lons_full = target_grb.latlons()
     lons_full = np.where(lons_full > 180, lons_full - 360, lons_full)
-    grbs.close()
 
-    # Convert native metric measurements to inches
+    # Convert metric to inches
     if getattr(target_grb, 'parameterUnits', '') == 'm':
         ffg_inches = data_full * 39.3701
     else:
@@ -110,27 +92,24 @@ def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
         
     ffg_inches = np.where(ffg_inches <= 0.01, np.nan, ffg_inches)
 
-    # 3. Apply NaN-Aware Gaussian Smoothing for Broadcast Graphics
+    # Apply NaN-Aware Gaussian Smoothing (sigma=0.6 for broadcast polish)
     valid_mask = ~np.isnan(ffg_inches)
     data_filled = np.copy(ffg_inches)
     data_filled[~valid_mask] = 0.0
 
-    # LOWERED SIGMA: 0.6 rounds the corners without blowing out the structural detail
     sigma = 0.6 
     smoothed_data = ndimage.gaussian_filter(data_filled, sigma=sigma)
     smoothed_mask = ndimage.gaussian_filter(valid_mask.astype(float), sigma=sigma)
 
-    # Reconstruct the smoothed array and re-apply the transparent mask
     ffg_smoothed = smoothed_data / np.clip(smoothed_mask, 1e-8, 1.0)
     ffg_smoothed[~valid_mask] = np.nan
 
-    # 4. Render Custom Image Canvas
+    # Render Image
     fig, ax = plt.subplots(figsize=(16, 9), dpi=240)
     fig.patch.set_alpha(0)
     ax.patch.set_alpha(0)
     ax.set_axis_off()
 
-    # Use contourf to generate the curved isopleths
     ax.contourf(
         lons_full, lats_full, ffg_smoothed,
         levels=bounds,
@@ -147,13 +126,13 @@ def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
     plt.savefig(png_path, format="png", transparent=True, dpi=240)
     plt.close()
 
-    # 5. Build KML GroundOverlay
+    # Build KML
     kml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Folder>
     <name>Custom Flash Flood Guidance</name>
     <GroundOverlay>
-      <name>1-Hour FFG</name>
+      <name>{duration_hr}-Hour FFG</name>
       <Icon>
         <href>{png_path}</href>
       </Icon>
@@ -170,14 +149,41 @@ def generate_kmz(output_kmz="Custom_FFG_1hr.kmz"):
     with open(kml_path, "w", encoding="utf-8") as f:
         f.write(kml_content)
 
-    # 6. Package KMZ
+    # Package KMZ
     with zipfile.ZipFile(output_kmz, "w", zipfile.ZIP_DEFLATED) as kmz:
         kmz.write(png_path, arcname=png_path)
         kmz.write(kml_path, arcname="doc.kml")
 
-    for p in [grib_path, png_path, kml_path]:
+    for p in [png_path, kml_path]:
         if os.path.exists(p):
             os.remove(p)
+            
+    print(f"Generated {output_kmz}")
+
+def generate_all_kmzs():
+    grib_path = "latest_ffg.grib2"
+    download_latest_iem_grib(grib_path)
+
+    grbs = pygrib.open(grib_path)
+    
+    # Isolate the 1hr, 3hr, and 6hr messages
+    target_grids = {}
+    for g in grbs:
+        step = str(g.stepRange)
+        if '1' in step and 1 not in target_grids:
+            target_grids[1] = g
+        elif '3' in step and 3 not in target_grids:
+            target_grids[3] = g
+        elif '6' in step and 6 not in target_grids:
+            target_grids[6] = g
+
+    for duration_hr, grid in target_grids.items():
+        print(f"Processing {duration_hr}-hour grid...")
+        process_and_render_grid(grid, duration_hr)
+
+    grbs.close()
+    if os.path.exists(grib_path):
+        os.remove(grib_path)
 
 if __name__ == "__main__":
-    generate_kmz("Custom_FFG_1hr.kmz")
+    generate_all_kmzs()
