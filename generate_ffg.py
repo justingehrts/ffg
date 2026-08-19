@@ -17,8 +17,8 @@ WEST, SOUTH, EAST, NORTH = -85.0, 38.0, -80.0, 42.0
 # ------------------------------------------------------------------------------
 # 2. EXACT COLOR PALETTE & THRESHOLD BREAKS (Inches)
 # ------------------------------------------------------------------------------
-# 9-Tier Universal scale across 1-hr, 3-hr, and 6-hr durations
-bounds = [0.0, 0.50, 0.75, 1.00, 1.50, 2.00, 3.00, 4.00, 5.00, 10.0]
+# 7-Tier Universal scale across 1-hr, 3-hr, and 6-hr durations
+bounds = [0.0, 0.50, 0.75, 1.00, 1.50, 2.00, 3.00, 10.0]
 
 # CVD-Safe Perceptually Uniform Sequential (Crimson -> Cream/Grey)
 colors_rgb = [
@@ -26,11 +26,9 @@ colors_rgb = [
     (165/255,  15/255,  21/255),  # 0.50" - 0.75" (Deep Red)
     (203/255,  24/255,  29/255),  # 0.75" - 1.00" (Strong Red)
     (239/255,  59/255,  44/255),  # 1.00" - 1.50" (Vibrant Red)
-    (251/255, 106/255,  74/255),  # 1.50" - 2.00" (Orange-Red)
-    (252/255, 146/255, 114/255),  # 2.00" - 3.00" (Soft Orange/Peach)
-    (254/255, 224/255, 210/255),  # 3.00" - 4.00" (Pale Peach)
-    (255/255, 245/255, 240/255),  # 4.00" - 5.00" (Cream)
-    (217/255, 217/255, 217/255)   # >= 5.00"      (Light Grey)
+    (252/255, 146/255, 114/255),  # 1.50" - 2.00" (Soft Orange/Peach)
+    (255/255, 245/255, 240/255),  # 2.00" - 3.00" (Cream)
+    (217/255, 217/255, 217/255)   # >= 3.00"      (Light Grey)
 ]
 
 cmap = ListedColormap(colors_rgb)
